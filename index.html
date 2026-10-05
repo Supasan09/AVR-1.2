@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>AR Monster Lab 🔥</title>
+<script src="https://aframe.io/releases/1.6.0/aframe.min.js"></script>
+<script src="https://raw.githack.com/AR-js-org/AR.js/3.4.7/aframe/build/aframe-ar.js"></script>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;font-family:"Sarabun","Noto Sans Thai",system-ui,sans-serif;background:#000}
+  #hud{position:fixed;inset:0;pointer-events:none;z-index:10}
+  #top{position:absolute;top:0;left:0;right:0;padding:max(10px,env(safe-area-inset-top)) 14px 10px;display:flex;justify-content:space-between;align-items:center;
+       background:linear-gradient(#000a,#0000)}
+  #title{color:#fff;font-weight:800;font-size:18px;text-shadow:0 2px 8px #000}
+  #chip{padding:6px 12px;border-radius:99px;font-size:13px;font-weight:700;color:#fff;background:#e5484d;box-shadow:0 0 12px #e5484d88}
+  #chip.ok{background:#16a34a;box-shadow:0 0 12px #16a34a88}
+  #camStatus{position:absolute;top:42px;right:14px;padding:5px 9px;border-radius:10px;background:#000b;color:#fff;font-size:11px;font-weight:700;text-shadow:0 1px 3px #000}
+  #camStatus.ok{background:#16a34dcc}
+  #camStatus.err{background:#dc2626dd;max-width:260px}
+  #camHelp{position:absolute;left:50%;top:57%;transform:translate(-50%,-50%);display:none;text-align:center;color:#fff;background:#000d;padding:14px 18px;border-radius:16px;max-width:min(90vw,520px);line-height:1.55;z-index:20}
+  #camHelp button{margin-top:9px;border:0;border-radius:12px;padding:9px 15px;font:inherit;font-weight:800;cursor:pointer}
+  #hp{position:absolute;top:58px;left:14px;width:170px;color:#fff;font-size:12px;font-weight:700;text-shadow:0 1px 4px #000}
+  #hp .bar{height:9px;margin-top:3px;border-radius:9px;background:#0008;overflow:hidden;border:1px solid #fff6}
+  #hp .bar i{display:block;height:100%;width:100%;background:linear-gradient(90deg,#22c55e,#a3e635);transition:width .3s}
+  #scan{position:absolute;left:50%;top:44%;transform:translate(-50%,-50%);text-align:center;color:#fff;font-weight:700;
+        background:#000a;padding:16px 22px;border-radius:18px;backdrop-filter:blur(6px);line-height:1.6}
+  #scan a{color:#ffd166;pointer-events:auto}
+  #toast{position:absolute;left:50%;top:30%;transform:translate(-50%,0) scale(.6);opacity:0;font-size:30px;font-weight:900;color:#fff;
+         text-shadow:0 0 14px #ffb703,0 3px 8px #000;white-space:nowrap}
+  #toast.show{animation:pop 1.8s ease forwards}
+  @keyframes pop{0%{opacity:0;transform:translate(-50%,0) scale(.5)}15%{opacity:1;transform:translate(-50%,0) scale(1.15)}30%{transform:translate(-50%,0) scale(1)}
+                 80%{opacity:1}100%{opacity:0;transform:translate(-50%,-40px) scale(1)}}
+  #bar{position:absolute;left:0;right:0;bottom:0;padding:14px 10px max(16px,env(safe-area-inset-bottom));display:flex;gap:10px;justify-content:center;
+       background:linear-gradient(#0000,#000b);pointer-events:auto}
+  .b{flex:1;max-width:96px;border:0;border-radius:20px;padding:10px 0 8px;color:#fff;font:inherit;font-weight:800;font-size:13px;cursor:pointer;
+     display:flex;flex-direction:column;align-items:center;gap:2px;box-shadow:0 6px 0 #0006,0 0 0 2px #fff4 inset;transition:transform .08s,filter .2s;-webkit-tap-highlight-color:transparent}
+  .b span{font-size:30px;line-height:1.1}
+  .b:active{transform:translateY(4px)}
+  .b.on{filter:brightness(1.25) saturate(1.2);box-shadow:0 0 22px #fff9,0 0 0 3px #fff inset}
+  #bFire{background:linear-gradient(#ff9d2f,#e5381d)}
+  #bWalk{background:linear-gradient(#34d399,#059669)}
+  #bFly{background:linear-gradient(#60a5fa,#4f46e5)}
+  #bCatch{background:linear-gradient(#f87171,#b91c1c)}
+</style>
+<script>
+/* ============ ตัวควบคุมเกม (ทำงานบน a-scene) ============ */
+AFRAME.registerComponent('game', {
+  init() {
+    const T = AFRAME.THREE, $ = id => document.getElementById(id);
+    const scene = this.el;
+    const S = { walk:false, fly:false, fire:0, c:null, caught:false, x:0, y:0, z:0, yaw:0, t:0, m:1, acc:0, found:false };
+    const P = [];                       // particles
+    const geo = new T.SphereGeometry(1, 8, 8);
+    this.S = S; this.P = P;
+
+    // ---- UI helpers ----
+    const toast = txt => { const e=$('toast'); e.textContent=txt; e.classList.remove('show'); void e.offsetWidth; e.classList.add('show'); };
+    const setOn = (id,on) => $(id).classList.toggle('on', !!on);
+    const hp = v => { $('hpv').style.width = v+'%'; };
+
+    scene.addEventListener('loaded', () => {
+      const R = {};
+      ['marker','rig','mon','head','mouth','armL','armR','legL','legR','tail','flame','wingL','wingR','ball']
+        .forEach(k => R[k] = $(k).object3D);
+      this.R = R;
+      const mk = R.marker, v = new T.Vector3();
+
+      $('marker').addEventListener('markerFound', () => { S.found=true; $('scan').style.display='none';
+        $('chip').textContent='✅ พบ Marker'; $('chip').classList.add('ok'); });
+      $('marker').addEventListener('markerLost',  () => { S.found=false; $('scan').style.display='block';
+        $('chip').textContent='🔍 กำลังค้นหา'; $('chip').classList.remove('ok'); });
+
+      // ---- particle ----
+      const spawn = (pos, vel, o) => {
+        const m = new T.MeshBasicMaterial({ color:o.c0, transparent:true, blending:T.AdditiveBlending, depthWrite:false });
+        const mesh = new T.Mesh(geo, m); mesh.position.copy(pos); mesh.scale.setScalar(o.s0);
+        mk.add(mesh); P.push({ mesh, vel, life:o.life, max:o.life, o, c0:new T.Color(o.c0), c1:new T.Color(o.c1) });
+      };
+      this.burst = (pos, n, c0, c1) => {
+        for (let i=0;i<n;i++){
+          const d = new T.Vector3(Math.random()-.5, Math.random()*.9, Math.random()-.5).normalize().multiplyScalar(.5+Math.random()*.8);
+          spawn(pos.clone(), d, { c0, c1, s0:.035, s1:.005, life:.9+Math.random()*.5, g:-.8 });
+        }
+      };
+
+      // ---- ปุ่ม ----
+      $('bFire').onclick = () => { if (S.c) return; S.fire = 1.6; toast('🔥 พ่นไฟ!!'); };
+      $('bWalk').onclick = () => { if (S.c) return; S.walk = !S.walk; setOn('bWalk', S.walk); toast(S.walk?'🚶 ออกเดิน':'🛑 หยุดเดิน'); };
+      $('bFly').onclick  = () => { if (S.c) return; S.fly = !S.fly; setOn('bFly', S.fly); toast(S.fly?'🪽 บินขึ้นฟ้า!':'🛬 ลงจอด'); };
+      $('bCatch').onclick = () => {
+        if (S.c) return;
+        if (S.caught) {                       // ปล่อยตัว
+          S.caught=false; R.ball.visible=false; S.c={p:5,t:0}; S.m=0; R.mon.visible=true;
+          $('bCatch').innerHTML='<span>⚪</span>จับ'; toast('✨ ปล่อยตัวแล้ว!'); return;
+        }
+        S.walk=false; S.fly=false; setOn('bWalk',0); setOn('bFly',0);
+        S.c = { p:0, t:0, win:Math.random()<.7 }; R.ball.visible=true; toast('⚪ ขว้างบอล!');
+      };
+      R.ball.visible = false;
+    });
+  },
+
+  tick(time, ms) {
+    const R = this.R; if (!R) return;
+    const T = AFRAME.THREE, S = this.S, P = this.P, $ = id => document.getElementById(id);
+    const dt = Math.min(ms/1000, .05); S.t += dt; const t = S.t;
+    const lerp = (a,b,k) => a+(b-a)*k, clamp = k => Math.max(0,Math.min(1,k));
+    const toast = txt => { const e=$('toast'); e.textContent=txt; e.classList.remove('show'); void e.offsetWidth; e.classList.add('show'); };
+    const v = new T.Vector3();
+
+    // ---- เคลื่อนที่ ----
+    const moving = (S.walk || S.fly) && !S.c;
+    if (moving) {
+      S.yaw += (S.fly?1.1:.8)*dt;
+      const r = Math.hypot(S.x, S.z);
+      if (r > .5) { const tg=Math.atan2(-S.x,-S.z); let d=((tg-S.yaw+Math.PI*3)%(Math.PI*2))-Math.PI; S.yaw += d*Math.min(1,4*dt); }
+      const sp = S.fly ? .5 : .32;
+      S.x += Math.sin(S.yaw)*sp*dt; S.z += Math.cos(S.yaw)*sp*dt;
+    }
+    const ty = S.fly && !S.c ? 1.0 + Math.sin(t*2.2)*.08 : 0;
+    S.y = lerp(S.y, ty, Math.min(1, 3*dt));
+    R.rig.position.set(S.x, S.y, S.z);
+    R.rig.rotation.y = S.yaw;
+
+    // ---- ท่าทาง ----
+    const walking = moving && !S.fly, sw = walking ? Math.sin(t*9)*.8 : 0;
+    R.legL.rotation.x = S.fly ? -.6 : sw;  R.legR.rotation.x = S.fly ? -.6 : -sw;
+    R.armL.rotation.x = -sw*.9; R.armR.rotation.x = sw*.9;
+    R.mon.position.y = walking ? Math.abs(Math.sin(t*9))*.07 : Math.sin(t*2)*.02;
+    R.mon.rotation.x = lerp(R.mon.rotation.x, S.fly ? .3 : 0, Math.min(1,5*dt));
+    R.tail.rotation.y = Math.sin(t*3)*.35;
+    const wingS = lerp(R.wingL.scale.x, S.fly ? 1 : 0.001, Math.min(1,6*dt));
+    R.wingL.scale.setScalar(wingS); R.wingR.scale.setScalar(wingS);
+    const fl = Math.sin(t*18)*.75; R.wingL.rotation.z = S.fly ? fl : .3; R.wingR.rotation.z = S.fly ? -fl : -.3;
+    R.head.rotation.x = lerp(R.head.rotation.x, S.fire>0 ? -.45 : 0, Math.min(1,10*dt));
+    R.flame.scale.setScalar((1 + Math.sin(t*22)*.2) * (S.fire>0 ? 1.8 : 1));
+    if (!S.c) R.mon.scale.setScalar(.4 * (S.m = lerp(S.m, 1, Math.min(1,6*dt))));
+
+    // ---- พ่นไฟ ----
+    if (S.fire > 0) {
+      S.fire -= dt; S.acc += dt*90;
+      while (S.acc > 1) {
+        S.acc--; R.mouth.getWorldPosition(v); R.marker.worldToLocal(v);
+        const f = new T.Vector3(Math.sin(S.yaw), (S.fly?-.25:.05), Math.cos(S.yaw));
+        const vel = f.multiplyScalar(1.3+Math.random()*.7).add(new T.Vector3((Math.random()-.5)*.3,(Math.random()-.5)*.25,(Math.random()-.5)*.3));
+        const m = new T.MeshBasicMaterial({ color:0xfff2a0, transparent:true, blending:T.AdditiveBlending, depthWrite:false });
+        const mesh = new T.Mesh(new T.SphereGeometry(1,8,8), m); mesh.position.copy(v); mesh.scale.setScalar(.04);
+        R.marker.add(mesh);
+        P.push({ mesh, vel, life:.85, max:.85, o:{s0:.04,s1:.2,g:.3}, c0:new T.Color(0xfff2a0), c1:new T.Color(0xd62800), geoOwn:true });
+      }
+    }
+
+    // ---- อนุภาค ----
+    for (let i=P.length-1;i>=0;i--) {
+      const p = P[i]; p.life -= dt; const k = 1 - p.life/p.max;
+      if (p.life <= 0) { R.marker.remove(p.mesh); p.mesh.material.dispose(); if (p.geoOwn) p.mesh.geometry.dispose(); P.splice(i,1); continue; }
+      p.mesh.position.addScaledVector(p.vel, dt); p.vel.y += p.o.g*dt;
+      p.mesh.scale.setScalar(lerp(p.o.s0, p.o.s1, k));
+      p.mesh.material.color.copy(p.c0).lerp(p.c1, k); p.mesh.material.opacity = 1-k*k;
+    }
+
+    // ---- จับโปเกบอล ----
+    const c = S.c;
+    if (c) {
+      c.t += dt; const B = R.ball, tgt = new T.Vector3(S.x, S.y+.35, S.z);
+      if (c.p === 0) {                                   // ขว้าง
+        const k = clamp(c.t/.8), st = new T.Vector3(0,1.6,2.0);
+        B.position.lerpVectors(st, tgt, k); B.position.y += Math.sin(k*Math.PI)*.6; B.rotation.x = k*12; B.scale.setScalar(1);
+        if (k >= 1) { c.p=1; c.t=0; this.burst(tgt, 30, 0xffffff, 0xff4040); }
+      } else if (c.p === 1) {                            // ดูดเข้าบอล
+        const k = clamp(c.t/.5); B.position.copy(tgt); R.mon.scale.setScalar(.4*(1-k)); S.m = 1-k;
+        if (k >= 1) { R.mon.visible=false; c.p=2; c.t=0; c.y0=B.position.y; }
+      } else if (c.p === 2) {                            // ตกพื้น
+        const k = clamp(c.t/.55); const b = Math.abs(Math.cos(k*Math.PI*1.5))*(1-k)*.25;
+        B.position.set(S.x, lerp(c.y0,.13,k)+b, S.z); B.rotation.set(0,0,0);
+        if (k >= 1) { c.p=3; c.t=0; }
+      } else if (c.p === 3) {                            // สั่น 3 ครั้ง
+        B.rotation.z = Math.sin(c.t*8)*.45*(1-c.t/4);
+        $('hpv').style.width = (100 - clamp(c.t/2.4)*100)+'%';
+        if (c.t >= 2.4) {
+          if (c.win) {
+            S.caught = true; S.c = null; B.rotation.z = 0; this.burst(new T.Vector3(S.x,.3,S.z), 50, 0xffffaa, 0xffaa00);
+            toast('🎉 จับได้แล้ว!!'); $('bCatch').innerHTML='<span>🔓</span>ปล่อย';
+          } else { c.p=4; c.t=0; }
+        }
+      } else if (c.p === 4) {                            // หลุด
+        this.burst(new T.Vector3(S.x,.3,S.z), 40, 0xffffff, 0x66ccff); B.visible=false; R.mon.visible=true; S.m=0;
+        S.c = null; toast('💨 หลุดออกมาแล้ว! ลองใหม่'); $('hpv').style.width='100%';
+      } else if (c.p === 5) { if (c.t > .1) { this.burst(new T.Vector3(S.x,.4,S.z), 30, 0xffffff, 0xffcc00); S.c=null; $('hpv').style.width='100%'; } }
+    }
+    if (S.caught) { R.ball.rotation.y = t*1.5; R.ball.position.y = .13 + Math.sin(t*3)*.02; }
+  }
+});
+</script>
+</head>
+<body>
+
+<div id="hud">
+  <div id="top"><div id="title">🔥 AR Monster Lab</div><div id="chip">🔍 กำลังค้นหา</div></div>
+  <div id="camStatus">📷 กำลังเปิดกล้อง…</div>
+  <div id="camHelp">📷 ยังเปิดกล้องไม่ได้<br><small id="camMsg">กำลังตรวจสอบสิทธิ์กล้อง…</small><br>  <button id="retryCam">🔄 ลองเปิดกล้องอีกครั้ง</button></div>
+  <div id="hp">FLAMEY &nbsp;Lv.25<div class="bar"><i id="hpv"></i></div></div>
+  <div id="scan">📱 ส่องกล้องไปที่ <b>Hiro Marker</b><br>
+    <small><a href="https://raw.githubusercontent.com/AR-js-org/AR.js/master/data/images/hiro.png" target="_blank" rel="noopener">เปิดรูป Hiro Marker</a> บนหน้าจอคอมได้เลย</small></div>
+  <div id="toast"></div>
+  <div id="bar">
+    <button class="b" id="bFire"><span>🔥</span>พ่นไฟ</button>
+    <button class="b" id="bWalk"><span>🚶</span>เดิน</button>
+    <button class="b" id="bFly"><span>🪽</span>บิน</button>
+    <button class="b" id="bCatch"><span>⚪</span>จับ</button>
+  </div>
+</div>
+
+<a-scene game
+         vr-mode-ui="enabled: false"
+         embedded
+         renderer="alpha: true; antialias: true; logarithmicDepthBuffer: true"
+         arjs="trackingMethod: best; sourceType: webcam; videoTexture: true; sourceWidth: 1280; sourceHeight: 720; displayWidth: 1280; displayHeight: 720; debugUIEnabled: false; patternRatio: 0.75">
+
+  <a-entity light="type: ambient; color: #ffffff; intensity: 0.9"></a-entity>
+  <a-entity light="type: directional; color: #fff4e0; intensity: 1.1" position="1 3 2"></a-entity>
+
+  <a-marker id="marker" preset="hiro">
+
+    <!-- วงเวทย์ใต้เท้า -->
+    <a-ring rotation="-90 0 0" position="0 0.005 0" radius-inner="0.46" radius-outer="0.5" color="#ffb703" material="shader:flat;opacity:.8" animation="property: rotation; to: -90 0 360; loop: true; dur: 8000; easing: linear"></a-ring>
+    <a-ring rotation="-90 0 0" position="0 0.004 0" radius-inner="0.0" radius-outer="0.46" color="#ff6a00" material="shader:flat;opacity:.18"></a-ring>
+
+    <!-- ตัวมอนสเตอร์ (สไตล์ไฟ ออกแบบเอง) -->
+    <a-entity id="rig">
+      <a-entity id="mon" scale="0.4 0.4 0.4">
+
+        <!-- ลำตัว -->
+        <a-sphere position="0 .9 0" radius=".5" scale="1 1.1 .9" color="#ff7a2f"></a-sphere>
+        <a-sphere position="0 .85 .3" radius=".4" scale=".8 1 .5" color="#ffe3a3"></a-sphere>
+        <!-- หนามหลัง -->
+        <a-cone position="0 1.3 -.42" rotation="-30 0 0" radius-bottom=".12" height=".3" color="#d94a14"></a-cone>
+        <a-cone position="0 .95 -.5" rotation="-20 0 0" radius-bottom=".14" height=".34" color="#d94a14"></a-cone>
+
+        <!-- หัว -->
+        <a-entity id="head" position="0 1.3 .1">
+          <a-sphere position="0 .45 0" radius=".45" color="#ff7a2f"></a-sphere>
+          <a-sphere position="0 .33 .4" radius=".25" scale="1 .75 1.1" color="#ff8f45"></a-sphere>
+          <a-cone position="-.25 .92 -.05" rotation="0 0 15" radius-bottom=".09" height=".25" color="#d94a14"></a-cone>
+          <a-cone position=".25 .92 -.05" rotation="0 0 -15" radius-bottom=".09" height=".25" color="#d94a14"></a-cone>
+          <a-sphere position="-.2 .58 .33" radius=".11" color="#fff"><a-sphere position="0 0 .07" radius=".06" color="#111"></a-sphere></a-sphere>
+          <a-sphere position=".2 .58 .33" radius=".11" color="#fff"><a-sphere position="0 0 .07" radius=".06" color="#111"></a-sphere></a-sphere>
+          <a-sphere position="-.1 .38 .62" radius=".025" color="#8a2a0a"></a-sphere>
+          <a-sphere position=".1 .38 .62" radius=".025" color="#8a2a0a"></a-sphere>
+          <a-entity id="mouth" position="0 .27 .65"></a-entity>
+        </a-entity>
+
+        <!-- แขน -->
+        <a-entity id="armL" position="-.5 1.1 .1"><a-sphere position="-.1 -.25 .05" radius=".16" scale=".9 1.5 .9" color="#ff7a2f"></a-sphere></a-entity>
+        <a-entity id="armR" position=".5 1.1 .1"><a-sphere position=".1 -.25 .05" radius=".16" scale=".9 1.5 .9" color="#ff7a2f"></a-sphere></a-entity>
+
+        <!-- ขา -->
+        <a-entity id="legL" position="-.26 .5 0"><a-sphere position="0 -.28 .05" radius=".2" scale="1 1.5 1.2" color="#ff7a2f"></a-sphere></a-entity>
+        <a-entity id="legR" position=".26 .5 0"><a-sphere position="0 -.28 .05" radius=".2" scale="1 1.5 1.2" color="#ff7a2f"></a-sphere></a-entity>
+
+        <!-- หาง + เปลวไฟ -->
+        <a-entity id="tail" position="0 .65 -.4" rotation="0 0 0">
+          <a-cone position="0 .05 -.4" rotation="-100 0 0" radius-bottom=".22" height=".9" color="#ff7a2f"></a-cone>
+          <a-entity id="flame" position="0 .2 -.95">
+            <a-cone radius-bottom=".2" height=".5" position="0 .15 0" color="#ff3b00" material="shader:flat"></a-cone>
+            <a-cone radius-bottom=".12" height=".35" position="0 .1 0" color="#ffe14d" material="shader:flat"></a-cone>
+            <a-light type="point" color="#ff8a2b" intensity="1.2" distance="3"></a-light>
+          </a-entity>
+        </a-entity>
+
+        <!-- ปีก (แสดงเมื่อบิน) -->
+        <a-entity id="wingL" position="-.35 1.35 -.3" scale=".001 .001 .001">
+          <a-sphere position="-.6 .15 0" radius=".5" scale="1.3 .05 .75" color="#ff5a1f" material="side:double"></a-sphere>
+          <a-sphere position="-.7 .1 .1" radius=".3" scale="1.3 .04 .6" color="#ffc15a"></a-sphere>
+        </a-entity>
+        <a-entity id="wingR" position=".35 1.35 -.3" scale=".001 .001 .001">
+          <a-sphere position=".6 .15 0" radius=".5" scale="1.3 .05 .75" color="#ff5a1f" material="side:double"></a-sphere>
+          <a-sphere position=".7 .1 .1" radius=".3" scale="1.3 .04 .6" color="#ffc15a"></a-sphere>
+        </a-entity>
+      </a-entity>
+    </a-entity>
+
+    <!-- โปเกบอล (สไตล์บอลจับมอนสเตอร์) -->
+    <a-entity id="ball" visible="false">
+      <a-sphere radius=".12" theta-start="0" theta-length="90" color="#e11d2e" material="side:double;metalness:.3;roughness:.4"></a-sphere>
+      <a-sphere radius=".12" theta-start="90" theta-length="90" color="#ffffff" material="side:double;metalness:.2;roughness:.4"></a-sphere>
+      <a-torus radius=".12" radius-tubular=".012" rotation="90 0 0" color="#111"></a-torus>
+      <a-sphere position="0 0 .118" radius=".035" color="#fff"></a-sphere>
+      <a-torus position="0 0 .118" radius=".035" radius-tubular=".008" color="#111"></a-torus>
+    </a-entity>
+
+  </a-marker>
+
+  <a-entity camera></a-entity>
+</a-scene>
+
+<script>
+(function () {
+  const status = document.getElementById('camStatus');
+  const help = document.getElementById('camHelp');
+  const msg = document.getElementById('camMsg');
+  const retry = document.getElementById('retryCam');
+
+  function setStatus(text, cls) {
+    status.textContent = text;
+    status.className = cls || '';
+  }
+
+  function showError(text) {
+    setStatus('❌ กล้องมีปัญหา', 'err');
+    msg.textContent = text;
+    help.style.display = 'block';
+  }
+
+  function hideError() {
+    help.style.display = 'none';
+  }
+
+  function startARCheck() {
+    hideError();
+    setStatus('📷 กำลังเปิดกล้อง…', '');
+
+    if (!window.isSecureContext) {
+      showError('หน้านี้ต้องเปิดผ่าน HTTPS หรือ localhost จึงจะใช้กล้องได้');
+      return;
+    }
+
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      showError('Browser นี้ไม่รองรับการเข้าถึงกล้อง กรุณาใช้ Chrome, Edge, Safari หรือ Firefox รุ่นปัจจุบัน');
+      return;
+    }
+
+    // Ask for camera permission first. The temporary stream is immediately
+    // released; AR.js then creates and manages its own camera stream.
+    navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false
+    }).then(function (stream) {
+      stream.getTracks().forEach(function (track) { track.stop(); });
+      setStatus('📷 ได้รับสิทธิ์กล้องแล้ว', 'ok');
+      setTimeout(function () {
+        if (status.className === 'ok') setStatus('🔍 กำลังค้นหา Marker', '');
+      }, 1600);
+    }).catch(function (err) {
+      const names = {
+        NotAllowedError: 'Chrome ไม่อนุญาตให้เว็บไซต์ใช้กล้อง — กดไอคอน 🔒 ข้าง URL แล้วตั้ง Camera เป็น Allow จากนั้นรีเฟรชหน้า',
+        PermissionDeniedError: 'Chrome ไม่อนุญาตให้เว็บไซต์ใช้กล้อง — ตั้ง Camera เป็น Allow แล้วรีเฟรชหน้า',
+        NotFoundError: 'ไม่พบกล้องในอุปกรณ์นี้',
+        NotReadableError: 'กล้องกำลังถูกใช้งานโดยโปรแกรมอื่น กรุณาปิด Camera/Teams/Zoom/โปรแกรมอื่นแล้วลองใหม่',
+        OverconstrainedError: 'การตั้งค่ากล้องไม่รองรับอุปกรณ์นี้',
+        SecurityError: 'Browser บล็อกการเข้าถึงกล้องด้วยเหตุผลด้านความปลอดภัย'
+      };
+      showError(names[err.name] || ('เปิดกล้องไม่สำเร็จ (' + err.name + ')'));
+    });
+  }
+
+  document.addEventListener('DOMContentLoaded', function () {
+    retry.addEventListener('click', startARCheck);
+
+    const scene = document.querySelector('a-scene');
+    if (scene) {
+      scene.addEventListener('camera-init', function () {
+        hideError();
+        setStatus('📷 กล้องพร้อมใช้งาน', 'ok');
+        setTimeout(function () {
+          if (status.className === 'ok') setStatus('🔍 กำลังค้นหา Marker', '');
+        }, 1200);
+      });
+
+      scene.addEventListener('camera-error', function (e) {
+        const detail = e && e.detail && (e.detail.error || e.detail);
+        showError('AR.js เปิดกล้องไม่ได้' + (detail ? ' — ' + detail : ''));
+      });
+    }
+
+    // Automatically request camera permission on page load as requested.
+    startARCheck();
+  });
+})();
+</script>
+
+</body>
+</html>
